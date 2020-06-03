@@ -1,0 +1,36 @@
+- hosts: all
+  gather_facts: True
+  tasks:
+    - name: Test connectivity
+      ping:
+      register: result
+
+    - name: Print result
+      debug:
+        msg: "{{ result['ping'] }}"
+
+    - name: Synchronize the reports directory to localhost
+      synchronize:
+        mode: pull
+        src: "{{ exe_path }}/reports"
+        dest: "{{ hostvars[inventory_hostname]['ansible_default_ipv4']['address'] }}-Report"
+        rsync_opts:
+          - "--exclude=.initial"
+          - "--delete-before"
+          - "--no-motd"
+
+    - name: Clear script cache folder
+      file:
+        path: "{{ exe_path }}"
+        state: absent
+
+    - name: Save job stage execute console log
+      shell: |
+        curl -s --location "{{ job_url }}"/raw > "{{ hostvars[inventory_hostname]['ansible_default_ipv4']['address'] }}-Report/console.log"
+        sed -i -r 's/'$(echo -e "\033")'\[[0-9]{1,2}(;([0-9]{1,2})?)?[mK]|\r//g' "{{ hostvars[inventory_hostname]['ansible_default_ipv4']['address'] }}-Report/console.log"
+      delegate_to: 'localhost'
+      register: shell_result
+
+    - name: Print shell result
+      debug:
+        msg: "{{ shell_result.stdout }}"

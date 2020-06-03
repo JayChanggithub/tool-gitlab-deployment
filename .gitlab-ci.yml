@@ -1,0 +1,151 @@
+variables:
+  sut_ip: "10.99.104.242"
+  script_cmd: "'bash service_gitlab.sh -h'"
+
+.normal: &normal
+  before_script:
+    - chmod 755 *.sh *.py
+    - echo "$CI_REGISTRY_PASSWORD" | docker login -u "$CI_REGISTRY_USER" "$CI_REGISTRY" --password-stdin
+  after_script:
+    - docker logout
+  tags:
+    - IPT-K8S-NODE2
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
+      - script_failure
+
+stages:
+  - lintcheck
+  - execution
+  - cleanup
+
+codeReview:Shell:
+  <<: *normal
+  stage: lintcheck
+  image: registry.ipt-gitlab:8081/sit-develop-tool/shellcheck:$SHCHECK_VER
+  before_script:
+    - echo "Starting Shell coding style verification."
+  script:
+    - find . -iname "*.sh" | xargs shellcheck -s bash --color=always || true
+  after_script:
+    - echo "Finish coding style verification."
+  tags:
+    - IPT-K8S-NODE2
+  when: always
+
+codeReview:Python:
+  <<: *normal
+  stage: lintcheck
+  image: registry.ipt-gitlab:8081/sit-develop-tool/sitpythonlinter:$PYLINT_VER
+  before_script:
+    - echo "Starting Python coding style verification."
+  script:
+    - find . -iname '*.py' | xargs pylint --rcfile=/home/app/pylintrc || true
+  after_script:
+    - echo "Finish coding style verification."
+  tags:
+    - IPT-K8S-NODE2
+  when: always
+
+runTask:
+  <<: *normal
+  stage: execution
+  image: registry.ipt-gitlab:8081/sit-develop-tool/tool-ansible:$ANSIBLE_VER
+  before_script:
+    - |
+        # configure hosts (replace ";" to "\n")
+        sed -i "s,<SRV_USER>,${SRV_USER},g" ${PWD}/hosts
+        sed -i "s,<SRV_PASS>,${SRV_PASS},g" ${PWD}/hosts
+        sed -i "s,<SRV_IP>,${sut_ip},g" ${PWD}/hosts
+        sed -i -E "s,\;,\n,g" ${PWD}/hosts
+
+        # configure the remote backup server password
+        sed -i "s,<BAK_PASS>,${BAK_PASS},g" ${PWD}/gitlab_backup_remote.sh
+
+        # deploy tools
+        ansible "*" -i ${PWD}/hosts -m shell -a "mkdir -p $WORK_PATH" -b
+        ansible "*" -i ${PWD}/hosts -m shell -a "rm -rf $EXE_PATH" -b
+        ansible "*" -i ${PWD}/hosts -m copy  -a "src=$PWD dest=$WORK_PATH owner=$SRV_USER group=$SRV_USER" -b
+        ansible "*" -i ${PWD}/hosts -m shell -a "cd $EXE_PATH && chmod 755 *.sh *.py" || true
+
+        echo "Configure server done."
+  script:
+    - |
+        # run schedule task
+        more << EOF
+        ===========================================================================
+        Starting run task on each server...
+         - Run time: $(date '+[%F %T]')
+         - Run command as below:
+            - ${script_cmd}
+        ===========================================================================
+        EOF
+        ansible "*" -i ${PWD}/hosts -m shell -a "cd $EXE_PATH && bash -c ${script_cmd}" -b
+  after_script:
+    - |
+        # generate artifacts in each hosts
+        for e in $(grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' hosts)
+        do
+            ansible "*" -i $PWD/hosts -m shell -a "cd $EXE_PATH && tar zcvf reports.tar.gz reports" -b
+            ansible "*" -i $PWD/hosts -m fetch -a "dest=$PWD src=${EXE_PATH}/reports.tar.gz" -b
+            mv ${e}/${EXE_PATH}/reports.tar.gz . && tar zxvf reports.tar.gz && rm -f reports.tar.gz
+            if [ -d $e ]; then
+                rm -rf $e
+            fi
+            mkdir ${e}-Report && mv reports ${e}-Report/test-logs
+        done
+
+        # clear task environ
+        ansible "*" -i $PWD/hosts -m shell -a "rm -rf $EXE_PATH" -b
+
+        # save console output to log in each host
+        for e in $(grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' hosts)
+        do
+            [ ! -d ${e}-Report ] && mkdir ${e}-Report
+            curl --silent --location ${CI_JOB_URL}/raw > ${e}-Report/console.log
+            sed -i -r 's/'$(echo -e "\033")'\[[0-9]{1,2}(;([0-9]{1,2})?)?[mK]|\r//g' ${e}-Report/console.log
+        done
+  artifacts:
+    name: ${CI_PROJECT_NAME}-Logs
+    expire_in: 4d
+    when: on_failure
+    paths:
+      - ${PWD}/*.*.*.*-Report
+  tags:
+    - IPT-K8S-NODE2
+  when: always
+  allow_failure: false
+
+cleanEnv:
+  stage: cleanup
+  script:
+    - |
+       echo "==========================================================================="
+       echo "List docker exited containers:"
+       echo "==========================================================================="
+       docker ps -a -f "status=exited"
+       [ $(docker ps -a -q -f "status=exited" | wc -l) -eq 0 ] && echo None
+       echo "==========================================================================="
+       echo "List docker untagged/dangling images:"
+       echo "==========================================================================="
+       docker images -f "dangling=true"
+       [ $(docker images -f "dangling=true" -q | wc -l) -eq 0 ] && echo None
+       echo "==========================================================================="
+       if [ $(docker ps -a -q -f "status=exited" | wc -l) -ne 0 ]; then
+           echo -e "\nStarting clear 'Exited' containers...\n"
+           docker rm $(docker ps -a -q -f "status=exited") || true
+       fi
+       if [ $(docker images -f "dangling=true" -q | wc -l) -ne 0 ]; then
+           echo -e "\nStarting clear 'Untagged/Dangling' images...\n"
+           docker image rmi $(docker images -f "dangling=true" -q) || true
+       fi
+       echo -e "\nClear docker cache done."
+  tags:
+    - IPT-K8S-NODE2
+  retry:
+    max: 2
+    when: runner_system_failure
+  when: always
+
