@@ -4,7 +4,7 @@ tool-gitlab-deployment
 This project is used to record automate deploy the **gitlab**, **ldap**, **httpd** server, backup all of project process.
 
 ## Version
-`Rev: 1.2.4`
+`Rev: 1.2.7`
 
 ---
 

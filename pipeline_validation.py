@@ -13,9 +13,7 @@ def getMissionData(script_name):
     if selector == 'update':
         data.update({"selector": selector})
     res = get(
-        'http://10.99.104.219:{0}/api/v1/script-management/missions/get'.format(
-            api_port
-        ),
+       'http://ares-script-mgmt.cloudnative.ies.inventec/api/v1/script-management/missions/get',
         data=data,
         verify=False
     )
@@ -27,15 +25,25 @@ def updateMissionData(get_data):
     data = get_data
     if selector == 'update':
         data.update({"selector": selector})
-    res = post(
-        'http://10.99.104.219:{0}/api/v1/script-management/missions/update'.format(
-            api_port
-        ),
-        data=data,
-        verify=False
-    )
-    res_code = res.status_code
-    ret_data = res.json()
+    data = {
+        k:str(v)
+        if isinstance(v, dict) and k == 'schedules'
+        else v
+        for k, v in data.items()
+    }
+    try:
+        res = post(
+            'http://ares-script-mgmt.cloudnative.ies.inventec/api/v1/script-management/missions/update',
+            data=data,
+            verify=False
+        )
+        res_code = res.status_code
+        ret_data = res.json()
+    except Exception as err:
+        print('Please ensure the commit tag is right and requests data is valid.')
+        print('Exception error message: ' + str(err))
+        raise SystemExit(-1)
+
     return ret_data, res_code
 
 if __name__ == '__main__':
@@ -67,6 +75,10 @@ if __name__ == '__main__':
         run_env = argv[5]
     except:
         run_env = 'prod'
+    try:
+        arg_flags = argv[6].lower().split(',')
+    except:
+        arg_flags = []
 
     # service environment selector
     if run_env == 'test':
@@ -91,6 +103,9 @@ if __name__ == '__main__':
 
     if stagestatus == 'validation':
         mail_msg = 'Please verify the script is satisfy in test requirement.'
+        if 'reject' in arg_flags:
+            mail_msg = ('Please re-verify the script ' +
+                        'if any dissatisfied requirements.')
         get_data.update(
             {
                 'author': get_data['developer'],
@@ -130,7 +145,15 @@ if __name__ == '__main__':
         )
         
     if get_status == 200:
-        updateMissionData(get_data)
+        res_data, res_code = updateMissionData(get_data)
+        if res_code > 400:
+            ret = {
+                "error": "Update Failed",
+                "response": res_data,
+                "code": res_code
+            }
+            print(dumps(ret, indent=4))
+            raise SystemExit(-1)
         result = 'success'
     else:
         result = 'faild'
